@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# THIS BASH SCRIPT IS WRITTEN FOR ECMWF ATOS HPC
+# Remapping IFS initial and boundary conditions to ICON model grid using cdo 
+# Based on the guide available at: https://docs.icon-model.org/buildrun/buildrun_ini_lbc_data.html#ref-buildrun-icbcifs
+# Date of creation: 2025-11-03
+# Author: Piero Serafini (University of L'Aquila, Italy)(CETEMPS, Italy)
+      
+#=============================================================================                                                                                                                                                                  #SBATCH --qos=ni
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --time=2-00:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --hint=nomultithread
+#SBATCH --mem=32G
+#SBATCH --output=ifs2icon.out
+#SBATCH --error=ifs2icon.out  
+
+# load modules
+# ------------
+module purge 
+
+# Be carefull: eccodes depends on cdo version !
+# If changing cdo version check for correct ecmwf-toolbox version
+# cdo --version
+# module spider eccodes/<version>
+module load prgenv/gnu
+module load cdo/2.5.3
+module load ecmwf-toolbox/2025.10.1.0
+
+#=============================================================================
+
+# Numero massimo di processi in parallelo
+MAXJOBS=8
+
+# Directory of initial conditions
+ICDIR=/<scratch>/<user>/<icdir>
+# Directory of Boundary Conditions
+LBCDIR=/<scratch>/<user>/<lbcdir>
+# Target Grid
+TG=/<scratch>/<user>/<griddir>/<grid_name>_DOM01.nc
+# If nesting =1 otherwise =0
+NESTING = 1
+TGN1=/<scratch>/<user>/<griddir>/<grid_name>_DOM02.nc
+
+#=====================================================================================================================================================================================
+#=====================================================================================================================================================================================
+#=====================================================================================================================================================================================
+
+echo "[START]====================================="
+
+echo "[INFO] Processing IC files"
+cd $ICDIR
+# Creating list of files
+IC_LIST=tmp_ic_list.txt
+find "$ICDIR" -type f -name '*ic*.grb' | while read -r file; do
+    basename "$file" .grb
+done | sort -V > "$IC_LIST"
+
+# Processing IC
+while read -r file; do
+    echo "[INFO] Renaming file ${file}"
+    file_tmp0="${file}.grb"
+    file_tmp1="${file}_tmp1.nc"
+    # Reformatting GRIB to NetCDF with cdo:
+    cdo -f nc copy "$file_tmp0" "$file_tmp1"
+    # Renaming Fields / Attributes in the NetCDF File
+    file_tmp2="${file}_tmp2.nc"
+    # Necessary Atmospheric, Surface, Soil fields and optional ones
+    cdo chname,u,U,v,V,w,W,t,T,z,GEOP_ML,q,QV,clwc,QC,ciwc,QI,lnsp,LNSP,ci,CI,z_2,GEOP_SFC,tsn,T_SNOW,sd,W_SNOW,rsn,RHO_SNOW,skt,SKT,src,W_I,lsm,LSM,stl1,STL1,stl2,STL2,stl3,STL3,stl4,STL4,swvl1,SMIL1,swvl2,SMIL2,swvl3,SMIL3,swvl4,SMIL4,sst,SST,asn,ALB_SNOW,crwc,QR,cswc,QS "$file_tmp1" "$file_tmp2"
+done < "$IC_LIST"
+    
+    
+
+# Remapping file IC
+echo "[INFO] Remapping IC files"
+while read -r file; do
+    echo "[INFO] Remapping file ${file}"
+    file_tmp2="${file}_tmp2.nc"
+    file_rmp="${file}_DOM01.nc"
+    cdo remapcon,$TG:1 "$file_tmp2" "$file_rmp"
+    if ["$NESTING" -eq 1]; then
+        file_rmp="${file}_DOM02.nc"
+        cdo remapcon,$TGN1:1 "$file_tmp2" "$file_rmp"
+    fi
+done < "$IC_LIST"
+
+echo "[INFO] Processing LBC files"
+cd $LBCDIR
+# Creating files list
+LBC_LIST=tmp_lbc_list.txt
+find "$LBCDIR" -type f -name '*lbc*.grb' | while read -r file; do
+    basename "$file" .grb
+done | sort -V > "$LBC_LIST"
+
+# Processing LBC
+echo "[INFO] Renaming LBC files vars"
+while read -r file; do
+    echo "[INFO] Renaming file ${file}"
+    file_tmp0="${file}.grb"
+    file_tmp1="${file}_tmp1.nc"
+    # Reformatting GRIB to NetCDF with cdo:
+    cdo -f nc copy "$file_tmp0" "$file_tmp1"
+    # Renaming Fields / Attributes in the NetCDF File
+    file_tmp2="${file}_tmp2.nc"
+    cdo chname,u,U,v,V,w,W,t,T,q,QV,clwc,QC,ciwc,QI,z,GEOP_SFC,sp,PS,crwc,QR,cswc,QS,sst,SST,src,W_I "$file_tmp1" "$file_tmp2"
+done < "$LBC_LIST"
+
+# Remapping file LBC
+echo "[INFO] Remapping LBC files"
+while read -r file; do
+    echo "[INFO] Remapping file ${file}"
+    file_tmp2="${file}_tmp2.nc"
+    file_rmp="${file}_remapped.nc"
+    cdo remapcon,$TG:1 "$file_tmp2" "$file_rmp"
+done < "$LBC_LIST"
+
+echo "[INFO] Removing temporary files"
+rm *tmp*
+cd $ICDIR
+rm *tmp*
+
+echo "[END]====================================="
+
+echo "THAT'S ALL FOLKS !!!!"
+#=====================================================================================================================================================================================
+#=====================================================================================================================================================================================
+#=====================================================================================================================================================================================
+
+# ==========================================================================================================================
+# Note: The workflow with precalculated weightings might fail when using the data in ICON due to missing values in the data.
+# ==========================================================================================================================

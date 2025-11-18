@@ -1,0 +1,45 @@
+# ICON
+#
+# ---------------------------------------------------------------
+# Copyright (C) 2004-2025, DWD, MPI-M, DKRZ, KIT, ETH, MeteoSwiss
+# Contact information: icon-model.org
+# See AUTHORS.TXT for a list of authors
+# See LICENSES/ for license information
+# SPDX-License-Identifier: BSD-3-Clause
+# ---------------------------------------------------------------
+
+# Dictionary for mapping between internal names and GRIB2/Netcdf
+# variable names, which is needed by ICON's read procedures.
+#
+# internal name     variable name (here GRIB2)
+geopot              GEOP_ML
+z_ifc               GEOP_SFC
+pres_sfc            LNPS
+u                   U
+v                   V
+w                   W
+temp                T
+qv                  QV
+qc                  QC
+qi                  QI
+qr                  QR
+qs                  QS
+fr_seaice           CI
+t_snow              T_SNOW
+w_snow              W_SNOW
+rho_snow            RHO_SNOW
+alb_snow            ALB_SNOW
+w_i                 W_I
+smi                 SMIL
+t_so                STL
+t_sk                SKT
+t_seasfc            SST
+gz0                 Z0
+fr_land             LSM
+cvl                 cvl
+cvh                 cvh
+sdor                sdor
+isor                isor
+anor                anor
+slor                slor
+slt                 slt

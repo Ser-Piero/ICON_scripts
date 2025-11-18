@@ -1,0 +1,270 @@
+#!/bin/bash
+
+# THIS BASH SCRIPT IS WRITTEN FOR ECMWF ATOS HPC
+# Run mars4icon_smi for multiple date ranges in order to retreive Initial and Boundary conditions for ICON model
+# Kind of data to retreive according to value of LBC variable: 
+#     0 = analysis initial conditions only (at START_DATES)
+#     1 = IC + forecast boundary condition (untill END_DATES)
+#     2 = IC + analysis boundary condition (untill END_DATES)
+# IC name format: "ic_an_ifs_<yyyy><mm><dd><hh>.grb"
+# LBC name format: "lbc_fc_ifs_<yyyy><mm><dd><hh>.grb" or "lbc_an_ifs_<yyyy><mm><dd><hh>.grb"
+# Based on the guide available at: https://docs.icon-model.org/buildrun/buildrun_ini_lbc_data.html#ref-buildrun-icbcifs
+# Date of creation: 2025-11-03
+# Author: Piero Serafini (University of L'Aquila, Italy)(CETEMPS, Italy)
+                                                                                                          #=============================================================================                                                                                                                                                                  #SBATCH --qos=ni
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --time=2-00:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --hint=nomultithread
+#SBATCH --mem=32G
+#SBATCH --output=mars4icon.out
+#SBATCH --error=mars4icon.out  
+
+# load modules
+# ----------------
+module purge                                                                                                            
+
+loadmodule="prgenv/gnu gcc/11.2.0 openmpi/4.1.1.1 hdf5/1.10.6 netcdf4/4.7.4 intel-mkl/19.0.5 ecmwf-toolbox/2021.12.0.0 aec/1.0.4"
+
+module load $loadmodule
+module list
+
+#=============================================================================
+# ---- MAIN VARIABLES ----
+# Directory of the main model
+ICONDIR=/<perm>/<user>/<icon>
+# Sub-directory where the program is located (default path)
+MARS=${ICONDIR}/scripts/preprocessing/mars4icon_smi
+# Directory where to store the outputs
+OUTDIR=/<scratch>/<user>/<ic_lbc_outdir>
+
+# ---- SETTINGS ----
+# area : North/West/South/East |lon ranges from -180.0 to +180.0 degrees|
+AREA="70.0/-30.0/20.0/60.0"
+# spectral resolution : 95, 106, 159, 213, 255, 319, 399, 511, 639, 799, 1023, 1279, 2047, av (i.e. archived value), auto, max
+RES="2047"
+# model levels : 1/to/137 since 2013062512, 1/to/91  after 2006020112, 1/to/60  before 2006020112
+LEVELS="1/to/137"
+# grid resolution : dlon/dlat (e.g. 0.25/0.25) for regular longitude-latitude grids
+GRID="0.1/0.1"
+
+# Kind of data to retreive
+# 0 = analysis initial conditions only (at START_DATES)
+# 1 = IC + forecast boundary condition (untill END_DATES)
+# 2 = IC + analysis boundary condition (untill END_DATES)
+LBC=1
+# steps for lbc (i.e. incresing hours)
+DH=3
+
+# ---- ARRAYS ----
+START_DATES=(
+  "2024-03-05 12:00"
+  "2024-09-01 12:00"
+)
+
+END_DATES=(
+  "2024-03-07 00:00"
+  "2024-09-03 00:00"
+)
+
+#=================================================================================================================================
+#=================================================================================================================================
+#=================================================================================================================================
+# ---- CHECK ARRAYS LENGTH (only if LBC > 0) ----
+if [ "$LBC" -gt 0 ]; then
+    if [ "${#START_DATES[@]}" -ne "${#END_DATES[@]}" ]; then
+        echo "[ERROR] Array length mismatch!"
+        echo "        START_DATES has ${#START_DATES[@]} elements"
+        echo "        END_DATES has   ${#END_DATES[@]} elements"
+        echo "Aborting."
+        exit 1
+    fi
+fi
+
+#=======================================================================================
+
+# ---- FUNCTIONS ----
+
+# ---- DATE HELPERS ----
+date_to_seconds() {
+    date -d "$1" +%s
+}
+
+seconds_to_date() {
+    date -u -d "@$1" +%Y%m%d%H
+}
+
+# ---- RUN INITIAL CONDITIONS ----
+run_ic() {
+    local start=$1
+    local date_code=$(date -u -d "$start" +%Y%m%d%H)
+    local outfile="ic_an_ifs_${date_code}.grb"
+
+    echo "[INFO][IC] Running for $date_code"
+    # ---- Check if file already exists ----
+    if [ -f "$outfile" ]; then
+        if [ -s "$outfile" ]; then
+            echo "[SKIP] File $outfile already exists and is not empty. Skipping download."
+            echo ""
+        else
+            echo "[WARNING] File $outfile exists but is empty! Re-downloading..."
+            $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $date_code -O -L 1 -o "$outfile" -p 8 -A
+        fi
+    else
+        $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $date_code -O -L 1 -o "$outfile" -p 8 -A
+    fi
+    
+
+    if [ -f "$outfile" ]; then
+        if [ -s "$outfile" ]; then
+            echo "[DONE] IC file $outfile successfully created."
+        else
+            echo "[WARNING] IC file $outfile exists but is empty!"
+        fi
+    else
+        echo "[ERROR] IC file $outfile not found!"
+        exit 1
+    fi
+    echo ""
+}
+
+# ---- RUN FORECAST LBC ----
+run_fc_lbc() {
+    local start=$1
+    local end=$2
+    local date_code=$(date -u -d "$start" +%Y%m%d%H)
+
+    local start_s=$(date_to_seconds "$start")
+    local end_s=$(date_to_seconds "$end")
+    local total_hours=$(( (end_s - start_s) / 3600 ))
+
+    echo "[INFO][LBC-FC] Running from $start to $end ($total_hours hours)"
+
+    local current_step=0
+    while [ $current_step -le $total_hours ]; do
+        local date_step=$(( start_s + (current_step * 3600) ))
+        local date_code_s=$(seconds_to_date $date_step)
+        local outfile="lbc_fc_ifs_${date_code_s}.grb"
+
+        echo "[DEBUG INFO] current_step=${current_step}h"
+        echo "[DEBUG INFO] date_step=${date_step}"
+        echo "[DEBUG INFO] date_code=${date_code_s}"
+
+        # ---- Check if file already exists ----
+        if [ -f "$outfile" ]; then
+            if [ -s "$outfile" ]; then
+                echo "[SKIP] File $outfile already exists and is not empty. Skipping download."
+            else
+                echo "[WARNING] File $outfile exists but is empty! Re-downloading..."
+                $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $date_code -s $current_step -o "$outfile" -E 0 -P -L 1 -A
+            fi
+        else
+            $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $date_code -s $current_step -o "$outfile" -E 0 -P -L 1 -A
+        fi
+
+        current_step=$((current_step + DH))
+    done
+
+    echo "[DONE] LBC-FC request for $date_code completed."
+    echo ""
+}
+
+# ---- RUN ANALYSIS LBC ----
+run_an_lbc() {
+    local start=$1
+    local end=$2
+
+    echo "[INFO][LBC-AN] Running from $start to $end"
+
+    local start_s=$(date_to_seconds "$start")
+    local end_s=$(date_to_seconds "$end")
+    local current_s=$start_s
+    # jump ic
+    current_s=$((current_s + 21600))  # step 6 hours (21600 s)
+
+    while [ $current_s -le $end_s ]; do
+        current_date=$(seconds_to_date $current_s)
+        outfile="$lbc_an_ifs_${current_date}_lbc.grb"
+        
+        echo "[INFO] Processing analysis LBC for $current_date"
+        # ---- Check if file already exists ----
+        if [ -f "$outfile" ]; then
+            if [ -s "$outfile" ]; then
+                echo "[SKIP] File $outfile already exists and is not empty. Skipping download."
+                echo ""
+            else
+                echo "[WARNING] File $outfile exists but is empty! Re-downloading..."
+                $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $current_date -o "$outfile" -p 8 -E 0 -P -L 1 -A
+            fi
+        else
+            $MARS -a $AREA -r $RES -l $LEVELS -g $GRID -d $current_date -o "$outfile" -p 8 -E 0 -P -L 1 -A
+        fi
+        
+
+        if [ -f "$outfile" ]; then
+            if [ -s "$outfile" ]; then
+                echo "[DONE] LBC-AN file $outfile successfully created."
+            else
+                echo "[WARNING] LBC-AN file $outfile exists but is empty!"
+            fi
+        else
+            echo "[ERROR] LBC-AN file $outfile not found!"
+            exit 1
+        fi
+
+        current_s=$((current_s + 21600))  # step 6 hours (21600 s)
+    done
+    echo ""
+}
+
+#=======================================================================================
+
+echo "[START]====================================="
+
+echo "[INFO] Output directory: ${OUTDIR}"
+cd $OUTDIR
+
+if [ "$LBC" -eq 0 ]; then
+    echo "[INFO] No boundary conditions requested."
+    echo "[INFO] Downloading Initial Conditions"
+    for i in "${!START_DATES[@]}"; do
+        run_ic "${START_DATES[$i]}"
+    done
+
+elif [ "$LBC" -eq 1 ]; then
+    echo "[INFO] Downloading Initial Conditions"
+    for i in "${!START_DATES[@]}"; do
+        run_ic "${START_DATES[$i]}"
+    done
+
+    echo "[INFO] Downloading Forecast Boundary Conditions"
+    for i in "${!START_DATES[@]}"; do
+        run_fc_lbc "${START_DATES[$i]}" "${END_DATES[$i]}"
+    done
+
+elif [ "$LBC" -eq 2 ]; then
+    echo "[INFO] Downloading Initial Conditions"
+    for i in "${!START_DATES[@]}"; do
+        run_ic "${START_DATES[$i]}"
+    done
+
+    echo "[INFO] Downloading Analysis Boundary Conditions"
+    for i in "${!START_DATES[@]}"; do
+        run_an_lbc "${START_DATES[$i]}" "${END_DATES[$i]}"
+    done
+
+else
+    echo "[ERROR] Not a valid value for LBC (LBC=${LBC})"
+    exit 1
+fi
+
+echo "[INFO] Output directory: ${OUTDIR}"
+echo "[END]====================================="
+
+echo "THAT'S ALL FOLKS !!!!"
+
+#=================================================================================================================================
+#=================================================================================================================================
+#=================================================================================================================================
+
